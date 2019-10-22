@@ -1,8 +1,8 @@
 package rtmp
 
 /*
-#cgo LDFLAGS: -lrtmp
 #include "librtmp/amf.h"
+#include "librtmp/log.h"
 */
 import "C"
 
@@ -102,6 +102,10 @@ func New(conn *net.TCPConn, evl func(ev int, arg interface{}, body []byte) error
 	r.outChunkSize = DefaultChunkSize
 
 	return &r
+}
+
+func init() {
+	C.RTMP_LogSetLevel(C.RTMP_LOGALL)
 }
 
 func (r *RTMP) write(b []byte) (int, error) {
@@ -322,8 +326,7 @@ func (r *RTMP) onCmdAMF0(st *stream) error {
 	var rc C.int
 
 	b := st.pkt.body
-	// TODO: why offset 1 for AMF0 ?
-	rc = C.AMF_Decode(&obj, (*C.char)(unsafe.Pointer(&b[1])), C.int(len(st.pkt.body))-1, 0)
+	rc = C.AMF_Decode(&obj, (*C.char)(unsafe.Pointer(&b[0])), C.int(len(b)), 0)
 	if rc < 0 {
 		str := fmt.Sprintf("Fail decode command(%d)", rc)
 		fmt.Printf(str)
@@ -341,6 +344,7 @@ func (r *RTMP) onCmdAMF3(st *stream) error {
 
 func (r *RTMP) onPacket(st *stream) error {
 	var err error
+
 	switch st.pkt.msgTypeID {
 	case MsgChunkSize:
 		err = r.onChunkSize(st)
@@ -361,10 +365,6 @@ func (r *RTMP) onPacket(st *stream) error {
 	case MsgAggregated:
 	}
 
-	st.pkt.body = nil
-	st.pkt.msgLen = 0
-	st.pkt.msgRead = 0
-
 	return err
 }
 
@@ -383,9 +383,12 @@ func (r *RTMP) onChunkBody(st *stream) error {
 	if nToRead < nRead {
 		nRead = nToRead
 	}
-	_, err := r.read(st.pkt.body[st.pkt.msgRead : st.pkt.msgRead+nRead])
-	if nil != err {
-		return err
+
+	if 0 < nRead {
+		_, err := r.read(st.pkt.body[st.pkt.msgRead : st.pkt.msgRead+nRead])
+		if nil != err {
+			return err
+		}
 	}
 	st.pkt.msgRead += nRead
 
@@ -393,8 +396,13 @@ func (r *RTMP) onChunkBody(st *stream) error {
 		return nil
 	}
 
-	return r.onPacket(st)
+	err := r.onPacket(st)
 
+	st.pkt.body = nil
+	st.pkt.msgLen = 0
+	st.pkt.msgRead = 0
+
+	return err
 }
 
 func (r *RTMP) onChunk() error {

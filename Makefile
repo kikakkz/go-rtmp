@@ -26,10 +26,11 @@ prepare: $(dirs)
 
 deps: prepare $(libs)
 
+export CGO_CFLAGS=-I$(rootdir)/output/$(sys)/include
+export CGO_LDFLAGS=-L$(rootdir)/output/$(sys)/lib -lrtmp
+
 all: $(libs)
 	cd src; CGO_ENABLED=1 	\
-		CGO_LDFLAGS=-L$(rootdir)/output/$(sys)/lib		\
-		CGO_CFLAGS=-I$(rootdir)/output/$(sys)/include	\
-		go build -o $(rootdir)/output/$(sys)/bin/go-rtmp-server
+		go build -x -o $(rootdir)/output/$(sys)/bin/go-rtmp-server
 
 .PHONY: all
