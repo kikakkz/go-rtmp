@@ -1,0 +1,11 @@
+diff -Nur rtmpdump/librtmp/rtmp_sys.h rtmpdump-o/librtmp/rtmp_sys.h
+--- rtmpdump/librtmp/rtmp_sys.h	2019-10-20 22:19:52.656884987 +0800
++++ rtmpdump-o/librtmp/rtmp_sys.h	2019-10-20 22:34:17.256111234 +0800
+@@ -50,6 +50,7 @@
+ #include <netinet/in.h>
+ #include <netinet/tcp.h>
+ #include <arpa/inet.h>
++#include <limits.h>
+ #define GetSockError()	errno
+ #define SetSockError(e)	errno = e
+ #undef closesocket
