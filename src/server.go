@@ -8,7 +8,7 @@ import (
 
 func handleConnection(conn *net.TCPConn) {
 	var rtmpConn *rtmp.RTMP
-	rtmpConn = rtmp.New(conn, func(ev int, b []byte) error {
+	rtmpConn = rtmp.New(conn, func(ev int, arg interface{}, b []byte) error {
 		switch ev {
 		case rtmp.EV_C0:
 			fmt.Printf("[%s] C0 ---\n", rtmpConn.Address())
@@ -32,10 +32,10 @@ func handleConnection(conn *net.TCPConn) {
 			fmt.Printf("[%s] MISMATCH TIMESTAMP ---\n", rtmpConn.Address())
 			break
 		case rtmp.EV_NEW_STREAM:
-			fmt.Printf("[%s] NEW STREAM ---\n", rtmpConn.Address())
+			fmt.Printf("[%s] NEW STREAM(%d) ---\n", rtmpConn.Address(), arg.(int))
 			break
 		case rtmp.EV_DEL_STREAM:
-			fmt.Printf("[%s] DEL STREAM ---\n", rtmpConn.Address())
+			fmt.Printf("[%s] DEL STREAM(%d) ---\n", rtmpConn.Address(), arg.(int))
 			break
 		}
 		return nil

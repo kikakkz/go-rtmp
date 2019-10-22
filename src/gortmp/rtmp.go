@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"time"
+	"unsafe"
 )
 
 const (
@@ -78,7 +79,7 @@ type stream struct {
 type RTMP struct {
 	stat         int
 	conn         *net.TCPConn
-	evl          func(ev int, body []byte) error
+	evl          func(ev int, arg interface{}, body []byte) error
 	tsC1         uint32
 	tsS1         uint32
 	tsReadC1     uint32
@@ -87,7 +88,7 @@ type RTMP struct {
 	outChunkSize int
 }
 
-func New(conn *net.TCPConn, evl func(ev int, body []byte) error) *RTMP {
+func New(conn *net.TCPConn, evl func(ev int, arg interface{}, body []byte) error) *RTMP {
 	var r RTMP
 
 	r.conn = conn
@@ -112,17 +113,17 @@ func (r *RTMP) read(b []byte) (int, error) {
 	n, err := r.conn.Read(b)
 	if nil != err {
 		if !r.netTimeout(err) {
-			fmt.Printf("Fail read C1(%s)\n", err)
-			r.event(EV_READ_FAIL, nil)
+			fmt.Printf("Fail read(%s)\n", err)
+			r.event(EV_READ_FAIL, nil, nil)
 			return 0, err
 		}
 	}
 	return n, nil
 }
 
-func (r *RTMP) event(ev int, b []byte) {
+func (r *RTMP) event(ev int, arg interface{}, b []byte) {
 	if nil != r.evl {
-		r.evl(ev, b)
+		r.evl(ev, arg, b)
 	}
 }
 
@@ -143,7 +144,7 @@ func (r *RTMP) onC0() error {
 	if Version != b[0] {
 		str := fmt.Sprintf("Mismatch version(%d != %d)\n", Version, b[0])
 		fmt.Printf(str)
-		r.event(EV_MISMATCH_VERSION, nil)
+		r.event(EV_MISMATCH_VERSION, nil, nil)
 		return errors.New(str)
 	}
 
@@ -154,7 +155,7 @@ func (r *RTMP) onC0() error {
 	r.tsS1 = timenow
 
 	r.write(b[0:])
-	r.event(EV_C0, nil)
+	r.event(EV_C0, nil, nil)
 	r.stat = HANDSHAKE_C1
 
 	return nil
@@ -171,7 +172,7 @@ func (r *RTMP) onC1() error {
 	zero := bin.BigEndian.Uint32(b[4:8])
 	if 0 != zero {
 		str := fmt.Sprintf("Not zero of zero field(%d)", zero)
-		r.event(EV_ZERO_ERROR, nil)
+		r.event(EV_ZERO_ERROR, nil, nil)
 		fmt.Printf(str)
 		return errors.New(str)
 	}
@@ -183,7 +184,7 @@ func (r *RTMP) onC1() error {
 	bin.BigEndian.PutUint32(b[4:8], r.tsReadC1)
 
 	r.write(b[0:])
-	r.event(EV_C1, nil)
+	r.event(EV_C1, nil, nil)
 	r.stat = HANDSHAKE_C2
 
 	return nil
@@ -199,11 +200,11 @@ func (r *RTMP) onC2() error {
 	tsS1 := bin.BigEndian.Uint32(b[0:4])
 	if tsS1 != r.tsS1 {
 		str := fmt.Sprintf("Server timestamp (%d ? %d)\n", r.tsS1, tsS1)
-		r.event(EV_MISMATCH_TS, nil)
+		r.event(EV_MISMATCH_TS, nil, nil)
 		return errors.New(str)
 	}
 
-	r.event(EV_C2, nil)
+	r.event(EV_C2, nil, nil)
 	r.stat = STREAMING
 
 	return nil
@@ -316,6 +317,28 @@ func (r *RTMP) onChunkSize(st *stream) error {
 	return nil
 }
 
+func (r *RTMP) onCmdAMF0(st *stream) error {
+	var obj C.AMFObject
+	var rc C.int
+
+	b := st.pkt.body
+	// TODO: why offset 1 for AMF0 ?
+	rc = C.AMF_Decode(&obj, (*C.char)(unsafe.Pointer(&b[1])), C.int(len(st.pkt.body))-1, 0)
+	if rc < 0 {
+		str := fmt.Sprintf("Fail decode command(%d)", rc)
+		fmt.Printf(str)
+		return errors.New(str)
+	}
+	C.AMF_Dump(&obj)
+
+	return nil
+}
+
+func (r *RTMP) onCmdAMF3(st *stream) error {
+	fmt.Printf("AMF3 CMD ---\n")
+	return nil
+}
+
 func (r *RTMP) onPacket(st *stream) error {
 	var err error
 	switch st.pkt.msgTypeID {
@@ -326,7 +349,9 @@ func (r *RTMP) onPacket(st *stream) error {
 	case MsgRecvWndSize:
 	case MsgBandwidth:
 	case MsgCmdAMF0:
+		err = r.onCmdAMF0(st)
 	case MsgCmdAMF3:
+		err = r.onCmdAMF3(st)
 	case MsgInfoAMF0:
 	case MsgInfoAMF3:
 	case MsgShareObjAMF0:
@@ -390,7 +415,7 @@ func (r *RTMP) onChunk() error {
 	if nil == st {
 		st = &stream{streamID: streamID}
 		r.streams = append(r.streams, st)
-		r.event(EV_NEW_STREAM, nil)
+		r.event(EV_NEW_STREAM, streamID, nil)
 	}
 
 	err = r.readHeader(st, headerType)
