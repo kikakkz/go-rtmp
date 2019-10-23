@@ -3,6 +3,15 @@ package rtmp
 /*
 #include "librtmp/amf.h"
 #include "librtmp/log.h"
+
+static inline void setByte(char *buf, int pos, char val)
+{
+	buf[pos] = val;
+}
+static inline char *pointInc(char *buf)
+{
+	return buf + 1;
+}
 */
 import "C"
 
@@ -60,6 +69,7 @@ const (
 )
 
 type packet struct {
+	headerType      uint8
 	absTimestamp    bool
 	timestamp       uint32
 	extTimestamp    bool
@@ -73,7 +83,8 @@ type packet struct {
 
 type stream struct {
 	streamID int
-	pkt      packet
+	pktIn    packet
+	pktOut   *packet
 }
 
 const (
@@ -278,6 +289,16 @@ func (r *RTMP) read3BytesStreamID() (int, error) {
 	return int(b[0])*256 + int(b[1]) + 64, nil
 }
 
+func (r *RTMP) streamIdBytes(st *stream) int {
+	if 319 < st.streamID {
+		return 2
+	}
+	if 64 < st.streamID {
+		return 1
+	}
+	return 0
+}
+
 func (r *RTMP) readStreamID(streamType uint8) (int, error) {
 	switch streamType {
 	case 0:
@@ -289,14 +310,14 @@ func (r *RTMP) readStreamID(streamType uint8) (int, error) {
 	}
 }
 
-func (r *RTMP) readHeader(st *stream, headerType uint8) error {
+func (r *RTMP) readHeader(st *stream) error {
 	var b [MaxHeaderSize]byte
 
 	headerLen := 0
-	switch headerType {
+	switch st.pktIn.headerType {
 	case 0:
 		headerLen = 11
-		st.pkt.absTimestamp = true
+		st.pktIn.absTimestamp = true
 		break
 	case 1:
 		headerLen = 7
@@ -315,28 +336,28 @@ func (r *RTMP) readHeader(st *stream, headerType uint8) error {
 		return err
 	}
 
-	switch headerType {
+	switch st.pktIn.headerType {
 	case 0:
-		st.pkt.msgStreamID = bin.LittleEndian.Uint32(b[7:headerLen])
+		st.pktIn.msgStreamID = bin.LittleEndian.Uint32(b[7:headerLen])
 		fallthrough
 	case 1:
-		st.pkt.msgLen = int(b[3]<<16 | b[4]<<8 | b[5])
-		st.pkt.msgTypeID = b[6]
+		st.pktIn.msgLen = int(b[3]<<16 | b[4]<<8 | b[5])
+		st.pktIn.msgTypeID = b[6]
 		fallthrough
 	case 2:
-		st.pkt.timestamp = uint32(b[0]<<16 | b[1]<<8 | b[2])
+		st.pktIn.timestamp = uint32(b[0]<<16 | b[1]<<8 | b[2])
 		fallthrough
 	case 3:
 		break
 	}
 
-	if 0xffffff == st.pkt.timestamp {
+	if 0xffffff == st.pktIn.timestamp {
 		_, err = r.read(b[0:4])
 		if nil != err {
 			return err
 		}
-		st.pkt.extTimestamp = true
-		st.pkt.extTimestampVal = bin.BigEndian.Uint32(b[0:4])
+		st.pktIn.extTimestamp = true
+		st.pktIn.extTimestampVal = bin.BigEndian.Uint32(b[0:4])
 	}
 
 	return nil
@@ -365,6 +386,45 @@ func (r *RTMP) onChunkSize(st *stream) error {
 
 	r.inChunkSize = int(bin.BigEndian.Uint32(b[0:4]))
 	return nil
+}
+
+func (r *RTMP) sendPacket(st *stream, pkt *packet) (int, error) {
+	st.pktOut = pkt
+	return 0, nil
+}
+
+func stringToAVal(str string) *C.AVal {
+	return &C.AVal{
+		av_val: (*C.char)(unsafe.Pointer(&([]byte("_result")[0]))),
+		av_len: C.int(len("_result"))}
+}
+
+func (r *RTMP) onConnectResp(st *stream, txId int) error {
+	var pkt packet
+
+	pkt.body = make([]byte, 384) // TODO: why 384
+
+	pkt.headerType = 1
+	pkt.msgTypeID = MsgCmdAMF0
+	pkt.timestamp = 0
+	pkt.msgStreamID = 0 // TODO: why 0
+	pkt.absTimestamp = false
+
+	end := (*C.char)(unsafe.Pointer(&pkt.body[len(pkt.body)]))
+	enc := (*C.char)(unsafe.Pointer(&pkt.body[MaxHeaderSize]))
+
+	val := stringToAVal("_result")
+	enc = C.AMF_EncodeString(enc, end, val)
+	enc = C.AMF_EncodeNumber(enc, end, C.double(txId))
+	C.setByte(enc, 0, C.AMF_OBJECT)
+	enc = C.pointInc(enc)
+
+	val = stringToAVal("FMS/3,5,1,525")
+	name := stringToAVal("fmsVer")
+	end = C.AMF_EncodeNamedString(enc, end, name, val)
+
+	_, err := r.sendPacket(st, &pkt)
+	return err
 }
 
 func (r *RTMP) onConnect(st *stream, txId int, obj *C.AMFObject, extraObjs []*C.AMFObject) error {
@@ -407,7 +467,7 @@ func (r *RTMP) onConnect(st *stream, txId int, obj *C.AMFObject, extraObjs []*C.
 		r.link.extras = extraObjs
 	}
 
-	return nil
+	return r.onConnectResp(st, txId)
 }
 
 func (r *RTMP) onCmd(st *stream, obj *C.AMFObject) error {
@@ -444,7 +504,7 @@ func (r *RTMP) onCmdAMF0(st *stream) error {
 	var obj C.AMFObject
 	var rc C.int
 
-	b := st.pkt.body
+	b := st.pktIn.body
 	rc = C.AMF_Decode(&obj, (*C.char)(unsafe.Pointer(&b[0])), C.int(len(b)), 0)
 	if rc < 0 {
 		str := fmt.Sprintf("Fail decode command(%d)", rc)
@@ -464,7 +524,7 @@ func (r *RTMP) onCmdAMF3(st *stream) error {
 func (r *RTMP) onPacket(st *stream) error {
 	var err error
 
-	switch st.pkt.msgTypeID {
+	switch st.pktIn.msgTypeID {
 	case MsgChunkSize:
 		err = r.onChunkSize(st)
 	case MsgStreamCancel:
@@ -488,38 +548,38 @@ func (r *RTMP) onPacket(st *stream) error {
 }
 
 func (r *RTMP) onChunkBody(st *stream) error {
-	if 0 == st.pkt.msgLen {
+	if 0 == st.pktIn.msgLen {
 		return nil
 	}
 
-	if 0 < st.pkt.msgLen && nil == st.pkt.body {
-		st.pkt.body = make([]byte, st.pkt.msgLen)
-		st.pkt.msgRead = 0
+	if 0 < st.pktIn.msgLen && nil == st.pktIn.body {
+		st.pktIn.body = make([]byte, st.pktIn.msgLen)
+		st.pktIn.msgRead = 0
 	}
 
-	nToRead := st.pkt.msgLen - st.pkt.msgRead
+	nToRead := st.pktIn.msgLen - st.pktIn.msgRead
 	nRead := r.inChunkSize
 	if nToRead < nRead {
 		nRead = nToRead
 	}
 
 	if 0 < nRead {
-		_, err := r.read(st.pkt.body[st.pkt.msgRead : st.pkt.msgRead+nRead])
+		_, err := r.read(st.pktIn.body[st.pktIn.msgRead : st.pktIn.msgRead+nRead])
 		if nil != err {
 			return err
 		}
 	}
-	st.pkt.msgRead += nRead
+	st.pktIn.msgRead += nRead
 
-	if st.pkt.msgLen != st.pkt.msgRead {
+	if st.pktIn.msgLen != st.pktIn.msgRead {
 		return nil
 	}
 
 	err := r.onPacket(st)
 
-	st.pkt.body = nil
-	st.pkt.msgLen = 0
-	st.pkt.msgRead = 0
+	st.pktIn.body = nil
+	st.pktIn.msgLen = 0
+	st.pktIn.msgRead = 0
 
 	return err
 }
@@ -531,7 +591,6 @@ func (r *RTMP) onChunk() error {
 		return err
 	}
 
-	headerType := (b[0] & 0xc0) >> 6
 	streamType := b[0] & 0x3f
 	streamID, err := r.readStreamID(streamType)
 	if nil != err {
@@ -545,7 +604,8 @@ func (r *RTMP) onChunk() error {
 		r.event(EV_NEW_STREAM, streamID, nil)
 	}
 
-	err = r.readHeader(st, headerType)
+	st.pktIn.headerType = (b[0] & 0xc0) >> 6
+	err = r.readHeader(st)
 	if nil != err {
 		return err
 	}
