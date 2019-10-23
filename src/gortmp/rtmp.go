@@ -76,6 +76,51 @@ type stream struct {
 	pkt      packet
 }
 
+const (
+	LINK_AUTH = 0x0001
+	LINK_LIVE = 0x0002
+	LINK_SWFV = 0x0004
+	LINK_PLST = 0x0008
+	LINK_BUFX = 0x0010
+	LINK_FTCU = 0x0020
+	LINK_FAPU = 0x0040
+)
+
+const (
+	ExtraStart = 3
+)
+
+// Not support crypto yet
+type Link struct {
+	hostname       *C.AVal
+	port           int
+	socksHost      *C.AVal
+	socksPort      int
+	playpath0      *C.AVal
+	playpath       *C.AVal
+	tcUrl          *C.AVal
+	swfUrl         *C.AVal
+	pageUrl        *C.AVal
+	app            *C.AVal
+	auth           *C.AVal
+	flashVer       *C.AVal
+	suscribePath   *C.AVal
+	usherToken     *C.AVal
+	token          *C.AVal
+	pubUser        *C.AVal
+	pubPasswd      *C.AVal
+	extras         []*C.AMFObject
+	linkFlags      uint16
+	swfAge         int
+	protocol       int
+	timeout        int
+	proxyUsed      bool
+	audioCodecs    int
+	videoCodecs    int
+	videoFunction  int
+	objectEncoding int
+}
+
 type RTMP struct {
 	stat         int
 	conn         *net.TCPConn
@@ -86,6 +131,7 @@ type RTMP struct {
 	streams      []*stream
 	inChunkSize  int
 	outChunkSize int
+	link         Link
 }
 
 func New(conn *net.TCPConn, evl func(ev int, arg interface{}, body []byte) error) *RTMP {
@@ -321,6 +367,79 @@ func (r *RTMP) onChunkSize(st *stream) error {
 	return nil
 }
 
+func (r *RTMP) onConnect(st *stream, txId int, obj *C.AMFObject, extraObjs []*C.AMFObject) error {
+	count := int(C.AMF_CountProp(obj))
+	for i := 0; i < count; i++ {
+		name := C.AVal{av_val: nil, av_len: 0}
+		valStr := C.AVal{av_val: nil, av_len: 0}
+
+		C.AMFProp_GetName(C.AMF_GetProp(obj, nil, C.int(i)), &name)
+		C.AMFProp_GetString(C.AMF_GetProp(obj, nil, C.int(i)), &valStr)
+		valBool := (0 != C.AMFProp_GetBoolean(C.AMF_GetProp(obj, nil, C.int(i))))
+		valInt := int(C.AMFProp_GetNumber(C.AMF_GetProp(obj, nil, C.int(i))))
+		prop := C.GoStringN(name.av_val, name.av_len)
+
+		switch prop {
+		case "app":
+			r.link.app = &valStr
+		case "flashver":
+			r.link.flashVer = &valStr
+		case "swfUrl":
+			r.link.swfUrl = &valStr
+		case "tcUrl":
+			r.link.tcUrl = &valStr
+		case "pageUrl":
+			r.link.pageUrl = &valStr
+		case "fpad":
+			r.link.proxyUsed = valBool
+		case "audioCodecs":
+			r.link.audioCodecs = valInt
+		case "videoCodecs":
+			r.link.videoCodecs = valInt
+		case "videoFunction":
+			r.link.videoFunction = valInt
+		case "objectEncoding":
+			r.link.objectEncoding = valInt
+		}
+	}
+
+	if nil != extraObjs {
+		r.link.extras = extraObjs
+	}
+
+	return nil
+}
+
+func (r *RTMP) onCmd(st *stream, obj *C.AMFObject) error {
+	var aval C.AVal
+	var cmdObj C.AMFObject
+	var extraObjs []*C.AMFObject = nil
+
+	C.AMFProp_GetString(C.AMF_GetProp(obj, nil, 0), &aval)
+	txId := int(C.AMFProp_GetNumber(C.AMF_GetProp(obj, nil, 1)))
+	C.AMFProp_GetObject(C.AMF_GetProp(obj, nil, 2), &cmdObj)
+	count := int(C.AMF_CountProp(obj))
+
+	if ExtraStart < count {
+		extraObjs = make([]*C.AMFObject, 0)
+		for i := ExtraStart; i < count; i++ {
+			var extObj C.AMFObject
+			C.AMFProp_GetObject(C.AMF_GetProp(obj, nil, C.int(i)), &extObj)
+			extraObjs = append(extraObjs, &extObj)
+		}
+	}
+
+	cmd := C.GoString(aval.av_val)
+	fmt.Printf("CMD --- %s(tx: %d)\n", cmd, txId)
+
+	switch cmd {
+	case "connect":
+		return r.onConnect(st, txId, &cmdObj, extraObjs)
+	}
+
+	return nil
+}
+
 func (r *RTMP) onCmdAMF0(st *stream) error {
 	var obj C.AMFObject
 	var rc C.int
@@ -334,7 +453,7 @@ func (r *RTMP) onCmdAMF0(st *stream) error {
 	}
 	C.AMF_Dump(&obj)
 
-	return nil
+	return r.onCmd(st, &obj)
 }
 
 func (r *RTMP) onCmdAMF3(st *stream) error {
