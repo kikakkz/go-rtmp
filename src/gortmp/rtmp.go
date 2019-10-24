@@ -1,16 +1,70 @@
 package rtmp
 
 /*
+#include <stdint.h>
+#include <string.h>
+
 #include "librtmp/amf.h"
 #include "librtmp/log.h"
 
-static inline void setByte(char *buf, int pos, char val)
+static inline char *encodeByte(char *buf, uint8_t val)
 {
-	buf[pos] = val;
+	*buf++ = val;
+	return buf;
 }
-static inline char *pointInc(char *buf)
+static inline int bufLen(char *start, char *end)
 {
-	return buf + 1;
+	return end - start;
+}
+static inline char *bufInc(char *buf, int inc)
+{
+	return buf + inc;
+}
+static inline char *amfEncodeString(char *enc, char *end, char *str)
+{
+	AVal val = {
+		.av_val = str,
+		.av_len = strlen(str)
+	};
+	return AMF_EncodeString(enc, end, &val);
+}
+static inline char *amfEncodeNamedString(char *enc, char *end, char *name, char *str)
+{
+	AVal av_name = {
+		.av_val = name,
+		.av_len = strlen(name)
+	};
+	AVal val = {
+		.av_val = str,
+		.av_len = strlen(str)
+	};
+	return AMF_EncodeNamedString(enc, end, &av_name, &val);
+}
+static inline char *amfEncodeNamedNumber(char *enc, char *end, char *name, double number)
+{
+	AVal av_name = {
+		.av_val = name,
+		.av_len = strlen(name)
+	};
+	return AMF_EncodeNamedNumber(enc, end, &av_name, number);
+}
+static inline char *amdEncodeVersion(char *enc, char *end)
+{
+	AMFObjectProperty prop;
+	AMFObjectProperty op;
+	AMFObject obj;
+
+#define STR2AVAL(av,str)	av.av_val = str; av.av_len = strlen(av.av_val)
+
+	STR2AVAL(prop.p_name, "version");
+	STR2AVAL(prop.p_vu.p_aval, "3,5,1,525");
+	prop.p_type = AMF_STRING;
+	obj.o_num = 1;
+	obj.o_props = &prop;
+	op.p_type = AMF_OBJECT;
+	STR2AVAL(op.p_name, "data");
+	op.p_vu.p_object = obj;
+	return AMFProp_Encode(&op, enc, end);
 }
 */
 import "C"
@@ -82,9 +136,11 @@ type packet struct {
 }
 
 type stream struct {
-	streamID int
-	pktIn    packet
-	pktOut   *packet
+	streamID  int
+	pktIn     packet
+	pktInCnt  int
+	pktOut    *packet
+	pktOutCnt int
 }
 
 const (
@@ -289,7 +345,7 @@ func (r *RTMP) read3BytesStreamID() (int, error) {
 	return int(b[0])*256 + int(b[1]) + 64, nil
 }
 
-func (r *RTMP) streamIdBytes(st *stream) int {
+func (st *stream) streamIdBytes() int {
 	if 319 < st.streamID {
 		return 2
 	}
@@ -310,25 +366,31 @@ func (r *RTMP) readStreamID(streamType uint8) (int, error) {
 	}
 }
 
+func (pkt *packet) headerLen() int {
+	switch pkt.headerType {
+	case 0:
+		return 11
+	case 1:
+		return 7
+	case 2:
+		return 3
+	case 3:
+		return 0
+	}
+	return -1
+}
+
 func (r *RTMP) readHeader(st *stream) error {
 	var b [MaxHeaderSize]byte
 
-	headerLen := 0
+	headerLen := st.pktIn.headerLen()
+	if headerLen < 0 {
+		return errors.New("Unknow header type")
+	}
+
 	switch st.pktIn.headerType {
 	case 0:
-		headerLen = 11
 		st.pktIn.absTimestamp = true
-		break
-	case 1:
-		headerLen = 7
-		break
-	case 2:
-		headerLen = 3
-		break
-	case 3:
-		break
-	default:
-		return errors.New("Unknow header type")
 	}
 
 	_, err := r.read(b[0:headerLen])
@@ -389,20 +451,146 @@ func (r *RTMP) onChunkSize(st *stream) error {
 }
 
 func (r *RTMP) sendPacket(st *stream, pkt *packet) (int, error) {
+	if 3 < pkt.headerType {
+		return -1, errors.New("Invalid header type")
+	}
+
+	var timestamp uint32
+	var timestampLast uint32
+
+	if 0 < st.pktOutCnt {
+		if 1 == pkt.headerType &&
+			st.pktOut.msgLen == pkt.msgLen &&
+			st.pktOut.headerType == pkt.headerType {
+			pkt.headerType = 2
+		}
+
+		if 2 == pkt.headerType &&
+			st.pktOut.timestamp == pkt.timestamp &&
+			st.pktOut.extTimestamp == pkt.extTimestamp &&
+			st.pktOut.extTimestampVal == pkt.extTimestampVal {
+			pkt.headerType = 3
+			if pkt.extTimestamp {
+				timestampLast = st.pktOut.extTimestampVal
+			} else {
+				timestampLast = st.pktOut.timestamp
+			}
+		}
+	}
+
+	headerLen := pkt.headerLen()
+	streamIdBytes := st.streamIdBytes()
+	headerLen += streamIdBytes
+	timestamp = pkt.timestamp - timestampLast
+	if 0xffffff < timestamp {
+		pkt.extTimestamp = true
+		pkt.extTimestampVal = timestamp
+		pkt.timestamp = 0xffffff
+		headerLen += 4
+	}
+
+	var pktBuf []byte = nil
+	var offs = MaxHeaderSize - headerLen
+
+	if nil == pkt.body {
+		pktBuf = make([]byte, headerLen)
+	} else {
+		pktBuf = pkt.body[offs : MaxHeaderSize+1]
+	}
+
+	end := (*C.char)(unsafe.Pointer(&pktBuf[MaxHeaderSize-offs]))
+	enc := (*C.char)(unsafe.Pointer(&pktBuf[0]))
+	start := enc
+
+	val := pkt.headerType << 6
+	switch streamIdBytes {
+	case 0:
+		val |= uint8(st.streamID)
+	case 1:
+	case 2:
+		val |= 1
+	}
+	enc = C.encodeByte(enc, C.uint8_t(val))
+
+	if 0 < streamIdBytes {
+		enc = C.encodeByte(enc, C.uint8_t(st.streamID-64))
+	}
+	if 1 < streamIdBytes {
+		enc = C.encodeByte(enc, C.uint8_t(st.streamID>>8))
+	}
+
+	if 1 < headerLen {
+		enc = C.AMF_EncodeInt24(enc, end, C.int(pkt.timestamp))
+	}
+	if 4 < headerLen {
+		enc = C.AMF_EncodeInt24(enc, end, C.int(pkt.msgLen))
+		enc = C.encodeByte(enc, C.uint8_t(pkt.msgTypeID))
+	}
+	if 8 < headerLen {
+		len := C.bufLen(start, enc)
+		bin.LittleEndian.PutUint32(pktBuf[len:len+4], pkt.msgStreamID)
+		enc = C.bufInc(enc, 4)
+	}
+	if pkt.extTimestamp {
+		enc = C.AMF_EncodeInt32(enc, end, C.int(pkt.extTimestampVal))
+	}
+
+	sendBytes := 0
+	sendBuf := pkt.body[offs : pkt.msgLen+MaxHeaderSize]
+	offs = 0
+	writeLen := r.outChunkSize
+	nextWriteEnd := headerLen + writeLen
+
+	for sendBytes < pkt.msgLen {
+		if pkt.msgLen < sendBytes+r.outChunkSize {
+			writeLen = pkt.msgLen - sendBytes
+		}
+
+		if 0 != offs {
+			offs -= 1
+			offs -= streamIdBytes
+			if pkt.extTimestamp {
+				offs -= 4
+			}
+			sendBuf[offs] = 0xc0 | val
+			if 0 < streamIdBytes {
+				sendBuf[offs+1] = byte(st.streamID - 64)
+			}
+			if 1 < streamIdBytes {
+				sendBuf[offs+2] = byte(st.streamID >> 8)
+			}
+			if pkt.extTimestamp {
+				end = (*C.char)(unsafe.Pointer(&sendBuf[offs+7]))
+				enc = (*C.char)(unsafe.Pointer(&sendBuf[offs+3]))
+				enc = C.AMF_EncodeInt32(enc, end, C.int(pkt.extTimestampVal))
+			}
+		}
+
+		n, err := r.write(sendBuf[offs:nextWriteEnd])
+		if n != nextWriteEnd-offs {
+			return n, errors.New("Not full wrote")
+		}
+		if nil != err {
+			return n, err
+		}
+
+		sendBytes += writeLen
+		offs = nextWriteEnd
+		nextWriteEnd += r.outChunkSize
+	}
+
 	st.pktOut = pkt
-	return 0, nil
+	return pkt.msgLen, nil
 }
 
-func stringToAVal(str string) *C.AVal {
-	return &C.AVal{
-		av_val: (*C.char)(unsafe.Pointer(&([]byte("_result")[0]))),
-		av_len: C.int(len("_result"))}
+func stringToCString(str string) *C.char {
+	return (*C.char)(unsafe.Pointer(&([]byte("_result")[0])))
 }
 
 func (r *RTMP) onConnectResp(st *stream, txId int) error {
 	var pkt packet
 
-	pkt.body = make([]byte, 384) // TODO: why 384
+	pkt.body = make([]byte, 386) // TODO: why 384
 
 	pkt.headerType = 1
 	pkt.msgTypeID = MsgCmdAMF0
@@ -410,18 +598,34 @@ func (r *RTMP) onConnectResp(st *stream, txId int) error {
 	pkt.msgStreamID = 0 // TODO: why 0
 	pkt.absTimestamp = false
 
-	end := (*C.char)(unsafe.Pointer(&pkt.body[len(pkt.body)]))
+	end := (*C.char)(unsafe.Pointer(&pkt.body[len(pkt.body)-1]))
 	enc := (*C.char)(unsafe.Pointer(&pkt.body[MaxHeaderSize]))
+	start := enc
 
-	val := stringToAVal("_result")
-	enc = C.AMF_EncodeString(enc, end, val)
+	enc = C.amfEncodeString(enc, end, stringToCString("_result"))
 	enc = C.AMF_EncodeNumber(enc, end, C.double(txId))
-	C.setByte(enc, 0, C.AMF_OBJECT)
-	enc = C.pointInc(enc)
 
-	val = stringToAVal("FMS/3,5,1,525")
-	name := stringToAVal("fmsVer")
-	end = C.AMF_EncodeNamedString(enc, end, name, val)
+	enc = C.encodeByte(enc, C.AMF_OBJECT)
+	enc = C.amfEncodeNamedString(enc, end, stringToCString("fmsVer"), stringToCString("FMS/3,5,1,525"))
+	enc = C.amfEncodeNamedNumber(enc, end, stringToCString("capabilities"), 31.0)
+	enc = C.amfEncodeNamedNumber(enc, end, stringToCString("mode"), 1.0)
+	enc = C.encodeByte(enc, 0)
+	enc = C.encodeByte(enc, 0)
+	enc = C.encodeByte(enc, C.AMF_OBJECT_END)
+
+	enc = C.encodeByte(enc, C.AMF_OBJECT)
+	enc = C.amfEncodeNamedString(enc, end, stringToCString("level"), stringToCString("status"))
+	enc = C.amfEncodeNamedString(enc, end, stringToCString("code"), stringToCString("NetConnection.Connect.Success"))
+	enc = C.amfEncodeNamedString(enc, end, stringToCString("description"), stringToCString("Connection success"))
+	enc = C.amfEncodeNamedNumber(enc, end, stringToCString("objectEncoding"), C.double(r.link.objectEncoding))
+
+	enc = C.amdEncodeVersion(enc, end)
+
+	enc = C.encodeByte(enc, 0)
+	enc = C.encodeByte(enc, 0)
+	enc = C.encodeByte(enc, C.AMF_OBJECT_END)
+
+	pkt.msgLen = int(C.bufLen(start, enc))
 
 	_, err := r.sendPacket(st, &pkt)
 	return err
