@@ -584,7 +584,7 @@ func (r *RTMP) sendPacket(st *stream, pkt *packet) (int, error) {
 }
 
 func stringToCString(str string) *C.char {
-	return (*C.char)(unsafe.Pointer(&([]byte("_result")[0])))
+	return (*C.char)(unsafe.Pointer(&([]byte(str)[0])))
 }
 
 func (r *RTMP) onConnectResp(st *stream, txId int) error {
