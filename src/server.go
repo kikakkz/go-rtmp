@@ -37,6 +37,9 @@ func handleConnection(conn *net.TCPConn) {
 		case rtmp.EV_DEL_STREAM:
 			fmt.Printf("[%s] DEL STREAM(%d) ---\n", rtmpConn.Address(), arg.(int))
 			break
+		case rtmp.EV_CREATE_STREAM:
+			fmt.Printf("[%s] CREATE STREAM(%d) ---\n", rtmpConn.Address(), arg.(int))
+			break
 		}
 		return nil
 	})
