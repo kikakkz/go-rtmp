@@ -48,7 +48,7 @@ static inline char *amfEncodeNamedNumber(char *enc, char *end, char *name, doubl
 	};
 	return AMF_EncodeNamedNumber(enc, end, &av_name, number);
 }
-static inline char *amdEncodeVersion(char *enc, char *end)
+static inline char *amfEncodeVersion(char *enc, char *end)
 {
 	AMFObjectProperty prop;
 	AMFObjectProperty op;
@@ -619,7 +619,7 @@ func (r *RTMP) onConnectResp(st *stream, txId int) error {
 	enc = C.amfEncodeNamedString(enc, end, stringToCString("description"), stringToCString("Connection success"))
 	enc = C.amfEncodeNamedNumber(enc, end, stringToCString("objectEncoding"), C.double(r.link.objectEncoding))
 
-	enc = C.amdEncodeVersion(enc, end)
+	enc = C.amfEncodeVersion(enc, end)
 
 	enc = C.encodeByte(enc, 0)
 	enc = C.encodeByte(enc, 0)

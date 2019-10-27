@@ -19,7 +19,7 @@ $(rootdir)/output/.intermediate/.rtmp.patched:
 
 $(rootdir)/output/$(sys)/lib/librtmp.a: $(rootdir)/output/.intermediate/.rtmp.patched
 	cd $(rootdir)/output/.intermediate/rtmpdump; make prefix=$(rootdir)/output/$(sys) CRYPTO= clean
-	cd $(rootdir)/output/.intermediate/rtmpdump; make prefix=$(rootdir)/output/$(sys) CRYPTO= all
+	cd $(rootdir)/output/.intermediate/rtmpdump; make prefix=$(rootdir)/output/$(sys) CRYPTO= XCFLAGS=-g OPT=-O0 all
 	cd $(rootdir)/output/.intermediate/rtmpdump; make prefix=$(rootdir)/output/$(sys) CRYPTO= install
 
 prepare: $(dirs)
