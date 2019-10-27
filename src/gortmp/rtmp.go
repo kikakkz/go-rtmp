@@ -478,7 +478,7 @@ func (r *RTMP) sendPacket(st *stream, pkt *packet) (int, error) {
 		}
 	}
 
-	headerLen := pkt.headerLen()
+	headerLen := pkt.headerLen() + 1 // For header type
 	streamIdBytes := st.streamIdBytes()
 	headerLen += streamIdBytes
 	timestamp = pkt.timestamp - timestampLast
@@ -495,10 +495,10 @@ func (r *RTMP) sendPacket(st *stream, pkt *packet) (int, error) {
 	if nil == pkt.body {
 		pktBuf = make([]byte, headerLen)
 	} else {
-		pktBuf = pkt.body[offs : MaxHeaderSize+1]
+		pktBuf = pkt.body[offs:MaxHeaderSize]
 	}
 
-	end := (*C.char)(unsafe.Pointer(&pktBuf[MaxHeaderSize-offs]))
+	end := (*C.char)(unsafe.Pointer(&pktBuf[MaxHeaderSize-offs-1]))
 	enc := (*C.char)(unsafe.Pointer(&pktBuf[0]))
 	start := enc
 
