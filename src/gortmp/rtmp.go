@@ -89,6 +89,7 @@ const (
 	MsgStreamCancel = 2
 	MsgSendWndSize  = 3
 	MsgRecvWndSize  = 5
+	MsgUserCtrl     = 4
 	MsgBandwidth    = 6
 	MsgCmdAMF0      = 20
 	MsgCmdAMF3      = 17
@@ -99,6 +100,24 @@ const (
 	MsgAudio        = 8
 	MsgVideo        = 9
 	MsgAggregated   = 22
+)
+
+const (
+	StreamMsgCtrl = 0
+)
+
+const (
+	StreamChunkCtrl = 2
+)
+
+const (
+	CTRL_STREAM_BEGIN     = 0
+	CTRL_STREAM_EOF       = 1
+	CTRL_STREAM_DRY       = 2
+	CTRL_SET_BUFFER_LEN   = 3
+	CTRL_STREAM_IS_RECORD = 4
+	CTRL_PING_REQUEST     = 6
+	CTRL_PING_RESPONSE    = 7
 )
 
 /* Only for RTMP server */
@@ -570,7 +589,6 @@ func (r *RTMP) sendPacket(st *stream, pkt *packet) (int, error) {
 		}
 
 		n, err := r.write(sendBuf[offs:nextWriteEnd])
-		fmt.Printf("offs %d next end %d write %d\n", offs, nextWriteEnd, n)
 		if n != nextWriteEnd-offs {
 			return n, errors.New("Not full wrote")
 		}
@@ -591,19 +609,19 @@ func stringToCString(str string) *C.char {
 	return (*C.char)(unsafe.Pointer(&([]byte(str)[0])))
 }
 
-func obtainPacket(bodySize int) *packet {
+func obtainPacket(bodySize int, headerType uint8, msgTypeID uint8, msgStreamID uint32) *packet {
 	var pkt packet
 	pkt.body = make([]byte, bodySize+MaxHeaderSize)
-	pkt.headerType = 1
-	pkt.msgTypeID = MsgCmdAMF0
+	pkt.headerType = headerType
+	pkt.msgTypeID = msgTypeID
 	pkt.timestamp = 0
-	pkt.msgStreamID = 0 // TODO: why 0
+	pkt.msgStreamID = msgStreamID
 	pkt.absTimestamp = false
 	return &pkt
 }
 
 func (r *RTMP) onConnectResp(st *stream, txID int) error {
-	pkt := obtainPacket(386) // TODO: why 384
+	pkt := obtainPacket(386, 1, MsgCmdAMF0, StreamMsgCtrl)
 
 	end := (*C.char)(unsafe.Pointer(&pkt.body[len(pkt.body)-1]))
 	enc := (*C.char)(unsafe.Pointer(&pkt.body[MaxHeaderSize]))
@@ -638,16 +656,16 @@ func (r *RTMP) onConnectResp(st *stream, txID int) error {
 	return err
 }
 
-func (r *RTMP) onConnect(st *stream, txID int, obj *C.AMFObject, extraObjs []*C.AMFObject) error {
-	count := int(C.AMF_CountProp(obj))
+func (r *RTMP) onConnect(st *stream, txID int, cmdObj *C.AMFObject, extraObjs []*C.AMFObject, obj *C.AMFObject) error {
+	count := int(C.AMF_CountProp(cmdObj))
 	for i := 0; i < count; i++ {
 		name := C.AVal{av_val: nil, av_len: 0}
 		valStr := C.AVal{av_val: nil, av_len: 0}
 
-		C.AMFProp_GetName(C.AMF_GetProp(obj, nil, C.int(i)), &name)
-		C.AMFProp_GetString(C.AMF_GetProp(obj, nil, C.int(i)), &valStr)
-		valBool := (0 != C.AMFProp_GetBoolean(C.AMF_GetProp(obj, nil, C.int(i))))
-		valInt := int(C.AMFProp_GetNumber(C.AMF_GetProp(obj, nil, C.int(i))))
+		C.AMFProp_GetName(C.AMF_GetProp(cmdObj, nil, C.int(i)), &name)
+		C.AMFProp_GetString(C.AMF_GetProp(cmdObj, nil, C.int(i)), &valStr)
+		valBool := (0 != C.AMFProp_GetBoolean(C.AMF_GetProp(cmdObj, nil, C.int(i))))
+		valInt := int(C.AMFProp_GetNumber(C.AMF_GetProp(cmdObj, nil, C.int(i))))
 		prop := C.GoStringN(name.av_val, name.av_len)
 
 		switch prop {
@@ -678,11 +696,12 @@ func (r *RTMP) onConnect(st *stream, txID int, obj *C.AMFObject, extraObjs []*C.
 		r.link.extras = extraObjs
 	}
 
+	r.sendCtrl(st, CTRL_STREAM_BEGIN, nil)
 	return r.onConnectResp(st, txID)
 }
 
 func (r *RTMP) onNumberResp(st *stream, txID int, streamID int) error {
-	pkt := obtainPacket(256)
+	pkt := obtainPacket(256, 1, MsgCmdAMF0, StreamMsgCtrl)
 
 	end := (*C.char)(unsafe.Pointer(&pkt.body[len(pkt.body)-1]))
 	enc := (*C.char)(unsafe.Pointer(&pkt.body[MaxHeaderSize]))
@@ -699,11 +718,82 @@ func (r *RTMP) onNumberResp(st *stream, txID int, streamID int) error {
 	return err
 }
 
-func (r *RTMP) onCreateStream(st *stream, txID int, obj *C.AMFObject, extraObjs []*C.AMFObject) error {
+func (r *RTMP) onCreateStream(st *stream, txID int, cmdObj *C.AMFObject, extraObjs []*C.AMFObject, obj *C.AMFObject) error {
 	streamID := r.createStreamID
 	r.createStreamID += 1
 	r.event(EV_CREATE_STREAM, streamID, nil)
 	return r.onNumberResp(st, txID, streamID)
+}
+
+func (r *RTMP) sendCtrl(st *stream, ctrl int, param interface{}) error {
+	var ctrlStream stream
+	ctrlStream.streamID = StreamChunkCtrl
+
+	pkt := obtainPacket(256, 1, MsgUserCtrl, StreamMsgCtrl)
+	end := (*C.char)(unsafe.Pointer(&pkt.body[len(pkt.body)-1]))
+	enc := (*C.char)(unsafe.Pointer(&pkt.body[MaxHeaderSize]))
+	start := enc
+
+	enc = C.AMF_EncodeInt16(enc, end, C.short(ctrl))
+
+	switch ctrl {
+	case CTRL_STREAM_BEGIN:
+		enc = C.AMF_EncodeInt32(enc, end, C.int(st.streamID))
+	}
+
+	pkt.msgLen = int(C.bufLen(start, enc))
+
+	_, err := r.sendPacket(&ctrlStream, pkt)
+	return err
+}
+
+func (r *RTMP) sendPlayResp(st *stream, txID int, reset bool) error {
+	pkt := obtainPacket(512, 1, MsgCmdAMF0, StreamMsgCtrl)
+
+	end := (*C.char)(unsafe.Pointer(&pkt.body[len(pkt.body)-1]))
+	enc := (*C.char)(unsafe.Pointer(&pkt.body[MaxHeaderSize]))
+	start := enc
+
+	enc = C.amfEncodeString(enc, end, stringToCString("onStatus"))
+	enc = C.AMF_EncodeNumber(enc, end, C.double(0))
+	enc = C.encodeByte(enc, C.AMF_OBJECT)
+
+	enc = C.amfEncodeNamedString(enc, end, stringToCString("level"), stringToCString("status"))
+	enc = C.amfEncodeNamedString(enc, end, stringToCString("code"), stringToCString("NetStream.Play.Start"))
+	enc = C.amfEncodeNamedString(enc, end, stringToCString("description"), stringToCString("Start play"))
+	enc = C.amfEncodeNamedString(enc, end, stringToCString("details"), r.link.playpath.av_val)
+	enc = C.amfEncodeNamedString(enc, end, stringToCString("clientid"), stringToCString("clientid"))
+	enc = C.encodeByte(enc, 0)
+	enc = C.encodeByte(enc, 0)
+	enc = C.encodeByte(enc, C.AMF_OBJECT_END)
+
+	pkt.msgLen = int(C.bufLen(start, enc))
+
+	_, err := r.sendPacket(st, pkt)
+	return err
+}
+
+func (r *RTMP) onPlayResp(st *stream, txID int, reset bool) error {
+	r.sendCtrl(st, CTRL_STREAM_BEGIN, nil)
+	return r.sendPlayResp(st, txID, reset)
+}
+
+func (r *RTMP) onPlay(st *stream, txID int, cmdObj *C.AMFObject, extraObjs []*C.AMFObject, obj *C.AMFObject) error {
+	var val C.AVal
+	C.AMFProp_GetString(C.AMF_GetProp(obj, nil, 3), &val)
+	if 0 == val.av_len {
+		return errors.New("Invalid playpath")
+	}
+
+	r.link.playpath = &val
+
+	startTime := int64(C.AMFProp_GetNumber(C.AMF_GetProp(obj, nil, 4)))
+	duration := int64(C.AMFProp_GetNumber(C.AMF_GetProp(obj, nil, 5)))
+	reset := (0 != C.AMFProp_GetNumber(C.AMF_GetProp(obj, nil, 6)))
+
+	fmt.Printf("PLAY %s(%d/%d need reset %v)\n", C.GoString(val.av_val), startTime, duration, reset)
+
+	return r.onPlayResp(st, txID, reset)
 }
 
 func (r *RTMP) onCmd(st *stream, obj *C.AMFObject) error {
@@ -730,9 +820,11 @@ func (r *RTMP) onCmd(st *stream, obj *C.AMFObject) error {
 
 	switch cmd {
 	case "connect":
-		return r.onConnect(st, txID, &cmdObj, extraObjs)
+		return r.onConnect(st, txID, &cmdObj, extraObjs, obj)
 	case "createStream":
-		return r.onCreateStream(st, txID, &cmdObj, extraObjs)
+		return r.onCreateStream(st, txID, &cmdObj, extraObjs, obj)
+	case "play":
+		return r.onPlay(st, txID, &cmdObj, extraObjs, obj)
 	}
 
 	return nil
