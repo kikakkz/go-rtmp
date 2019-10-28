@@ -40,6 +40,10 @@ func handleConnection(conn *net.TCPConn) {
 		case rtmp.EV_CREATE_STREAM:
 			fmt.Printf("[%s] CREATE STREAM(%d) ---\n", rtmpConn.Address(), arg.(int))
 			break
+		case rtmp.EV_PLAY:
+			param := arg.(rtmp.PlayParam)
+			fmt.Printf("[%s] PLAY(%s) ---\n", rtmpConn.Address(), param.ToString())
+			break
 		}
 		return nil
 	})

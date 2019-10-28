@@ -140,7 +140,14 @@ const (
 	EV_NEW_STREAM       = 8
 	EV_DEL_STREAM       = 9
 	EV_CREATE_STREAM    = 10
+	EV_PLAY             = 11
 )
+
+type PlayParam struct {
+	Playpath string
+	App      string
+	Reset    bool
+}
 
 type packet struct {
 	headerType      uint8
@@ -220,6 +227,10 @@ type RTMP struct {
 	outChunkSize   int
 	createStreamID int /* Request of create stream */
 	link           Link
+}
+
+func (p *PlayParam) ToString() string {
+	return fmt.Sprintf("/%s/%s(R:%v)", p.App, p.Playpath, p.Reset)
 }
 
 func New(conn *net.TCPConn, evl func(ev int, arg interface{}, body []byte) error) *RTMP {
@@ -793,6 +804,10 @@ func (r *RTMP) onPlay(st *stream, txID int, cmdObj *C.AMFObject, extraObjs []*C.
 
 	fmt.Printf("PLAY %s(%d/%d need reset %v)\n", C.GoString(val.av_val), startTime, duration, reset)
 
+	r.event(EV_PLAY, PlayParam{
+		Playpath: C.GoString(val.av_val),
+		App:      C.GoString(r.link.app.av_val),
+		Reset:    reset}, nil)
 	return r.onPlayResp(st, txID, reset)
 }
 
