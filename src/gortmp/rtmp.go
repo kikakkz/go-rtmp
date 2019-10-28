@@ -93,8 +93,8 @@ const (
 	MsgBandwidth    = 6
 	MsgCmdAMF0      = 20
 	MsgCmdAMF3      = 17
-	MsgInfoAMF0     = 18
-	MsgInfoAMF3     = 15
+	MsgMetaAMF0     = 18
+	MsgMetaAMF3     = 15
 	MsgShareObjAMF0 = 19
 	MsgShareObjAMF3 = 16
 	MsgAudio        = 8
@@ -104,6 +104,7 @@ const (
 
 const (
 	StreamMsgCtrl = 0
+	StreamMsgData = 1
 )
 
 const (
@@ -140,7 +141,8 @@ const (
 	EV_NEW_STREAM       = 8
 	EV_DEL_STREAM       = 9
 	EV_CREATE_STREAM    = 10
-	EV_PLAY             = 11
+	EV_START_PLAY       = 11
+	EV_STOP_PLAY        = 11
 )
 
 type PlayParam struct {
@@ -178,6 +180,12 @@ const (
 	LINK_BUFX = 0x0010
 	LINK_FTCU = 0x0020
 	LINK_FAPU = 0x0040
+)
+
+const (
+	DataTypeMetadata = 0
+	DataTypeVideo    = 1
+	DataTypeAudio    = 2
 )
 
 const (
@@ -227,6 +235,8 @@ type RTMP struct {
 	outChunkSize   int
 	createStreamID int /* Request of create stream */
 	link           Link
+	playing        bool
+	dataStream     *stream
 }
 
 func (p *PlayParam) ToString() string {
@@ -258,7 +268,7 @@ func (r *RTMP) write(b []byte) (int, error) {
 }
 
 func (r *RTMP) read(b []byte) (int, error) {
-	r.conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+	r.conn.SetReadDeadline(time.Now().Add(2 * time.Millisecond))
 	n, err := r.conn.Read(b)
 	if nil != err {
 		if !r.netTimeout(err) {
@@ -617,7 +627,9 @@ func (r *RTMP) sendPacket(st *stream, pkt *packet) (int, error) {
 }
 
 func stringToCString(str string) *C.char {
-	return (*C.char)(unsafe.Pointer(&([]byte(str)[0])))
+	var localStrBytes = make([]byte, len(str)+1)
+	copy(localStrBytes, []byte(str))
+	return (*C.char)(unsafe.Pointer(&(localStrBytes[0])))
 }
 
 func obtainPacket(bodySize int, headerType uint8, msgTypeID uint8, msgStreamID uint32) *packet {
@@ -729,6 +741,18 @@ func (r *RTMP) onNumberResp(st *stream, txID int, streamID int) error {
 	return err
 }
 
+func (r *RTMP) onDeleteStream(st *stream, txID int, cmdObj *C.AMFObject, extraObjs []*C.AMFObject, obj *C.AMFObject) error {
+	streamID := C.AMFProp_GetNumber(C.AMF_GetProp(obj, nil, 3))
+	for k, st := range r.streams {
+		if int(streamID) == st.streamID {
+			r.streams = append(r.streams[0:k], r.streams[k+1:]...)
+		}
+	}
+	r.playing = false
+	r.event(EV_DEL_STREAM, streamID, nil)
+	return nil
+}
+
 func (r *RTMP) onCreateStream(st *stream, txID int, cmdObj *C.AMFObject, extraObjs []*C.AMFObject, obj *C.AMFObject) error {
 	streamID := r.createStreamID
 	r.createStreamID += 1
@@ -767,6 +791,9 @@ func (r *RTMP) sendPlayResp(st *stream, txID int, reset bool) error {
 
 	enc = C.amfEncodeString(enc, end, stringToCString("onStatus"))
 	enc = C.AMF_EncodeNumber(enc, end, C.double(0))
+
+	enc = C.encodeByte(enc, C.AMF_NULL)
+
 	enc = C.encodeByte(enc, C.AMF_OBJECT)
 
 	enc = C.amfEncodeNamedString(enc, end, stringToCString("level"), stringToCString("status"))
@@ -804,10 +831,14 @@ func (r *RTMP) onPlay(st *stream, txID int, cmdObj *C.AMFObject, extraObjs []*C.
 
 	fmt.Printf("PLAY %s(%d/%d need reset %v)\n", C.GoString(val.av_val), startTime, duration, reset)
 
-	r.event(EV_PLAY, PlayParam{
+	r.event(EV_START_PLAY, PlayParam{
 		Playpath: C.GoString(val.av_val),
 		App:      C.GoString(r.link.app.av_val),
 		Reset:    reset}, nil)
+
+	r.dataStream = st
+	r.playing = true
+
 	return r.onPlayResp(st, txID, reset)
 }
 
@@ -838,6 +869,8 @@ func (r *RTMP) onCmd(st *stream, obj *C.AMFObject) error {
 		return r.onConnect(st, txID, &cmdObj, extraObjs, obj)
 	case "createStream":
 		return r.onCreateStream(st, txID, &cmdObj, extraObjs, obj)
+	case "deleteStream":
+		return r.onDeleteStream(st, txID, &cmdObj, extraObjs, obj)
 	case "play":
 		return r.onPlay(st, txID, &cmdObj, extraObjs, obj)
 	}
@@ -880,8 +913,8 @@ func (r *RTMP) onPacket(st *stream) error {
 		err = r.onCmdAMF0(st)
 	case MsgCmdAMF3:
 		err = r.onCmdAMF3(st)
-	case MsgInfoAMF0:
-	case MsgInfoAMF3:
+	case MsgMetaAMF0:
+	case MsgMetaAMF3:
 	case MsgShareObjAMF0:
 	case MsgShareObjAMF3:
 	case MsgAudio:
@@ -926,6 +959,29 @@ func (r *RTMP) onChunkBody(st *stream) error {
 	st.pktIn.msgLen = 0
 	st.pktIn.msgRead = 0
 
+	return err
+}
+
+func (r *RTMP) SendData(data []byte, dataType int) error {
+	if !r.playing {
+		return errors.New("Not playing")
+	}
+
+	var pkt *packet
+
+	switch dataType {
+	case DataTypeAudio:
+		pkt = obtainPacket(len(data), 0, MsgAudio, StreamMsgData)
+	case DataTypeVideo:
+		pkt = obtainPacket(len(data), 0, MsgVideo, StreamMsgData)
+	case DataTypeMetadata:
+		pkt = obtainPacket(len(data), 0, MsgMetaAMF0, StreamMsgData)
+	}
+
+	copy(pkt.body[MaxHeaderSize:], data[0:])
+	pkt.msgLen = len(data)
+
+	_, err := r.sendPacket(r.dataStream, pkt)
 	return err
 }
 

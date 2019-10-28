@@ -8,6 +8,8 @@ import (
 
 func handleConnection(conn *net.TCPConn) {
 	var rtmpConn *rtmp.RTMP
+	playing := false
+
 	rtmpConn = rtmp.New(conn, func(ev int, arg interface{}, b []byte) error {
 		switch ev {
 		case rtmp.EV_C0:
@@ -36,13 +38,15 @@ func handleConnection(conn *net.TCPConn) {
 			break
 		case rtmp.EV_DEL_STREAM:
 			fmt.Printf("[%s] DEL STREAM(%d) ---\n", rtmpConn.Address(), arg.(int))
+			playing = false
 			break
 		case rtmp.EV_CREATE_STREAM:
 			fmt.Printf("[%s] CREATE STREAM(%d) ---\n", rtmpConn.Address(), arg.(int))
 			break
-		case rtmp.EV_PLAY:
+		case rtmp.EV_START_PLAY:
 			param := arg.(rtmp.PlayParam)
 			fmt.Printf("[%s] PLAY(%s) ---\n", rtmpConn.Address(), param.ToString())
+			playing = true
 			break
 		}
 		return nil
@@ -54,6 +58,13 @@ func handleConnection(conn *net.TCPConn) {
 		if nil != err {
 			fmt.Printf("%s\n", err)
 			return
+		}
+		if playing {
+			data := make([]byte, 256)
+			err := rtmpConn.SendData(data[0:], rtmp.DataTypeAudio)
+			if nil != err {
+				// TODO: finish RTMP here due to network error
+			}
 		}
 	}
 }
