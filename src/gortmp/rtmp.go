@@ -1,4 +1,4 @@
-package itmp
+package rtmp
 
 /*
 #include <stdint.h>
@@ -330,10 +330,10 @@ func (r *RTMP) onC1() error {
 	timestamp := bin.BigEndian.Uint32(b[0:4])
 	zero := bin.BigEndian.Uint32(b[4:8])
 	if 0 != zero {
-		str := fmt.Sprintf("Not zero of zero field(%d)", zero)
+		str := fmt.Sprintf("Not zero of zero field(%d)\n", zero)
 		r.event(EV_ZERO_ERROR, nil, nil)
 		fmt.Printf(str)
-		return errors.New(str)
+		// return errors.New(str)
 	}
 
 	r.tsC1 = timestamp

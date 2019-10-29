@@ -1,10 +1,19 @@
 package main
 
 import (
+	"flag"
 	"fmt"
+	flv "goflv"
 	rtmp "gortmp"
 	"net"
+	"os"
 )
+
+var flvFilePath string
+
+func init() {
+	flag.StringVar(&flvFilePath, "flv", "./test.flv", "`flv` to be send")
+}
 
 func handleConnection(conn *net.TCPConn) {
 	var rtmpConn *rtmp.RTMP
@@ -53,6 +62,11 @@ func handleConnection(conn *net.TCPConn) {
 	})
 	defer rtmpConn.Destroy()
 
+	flvFile, _ := os.Open(flvFilePath)
+	defer flvFile.Close()
+	var buf [1024]byte
+	var offs = 0
+
 	for {
 		err := rtmpConn.OnChunk()
 		if nil != err {
@@ -60,16 +74,43 @@ func handleConnection(conn *net.TCPConn) {
 			return
 		}
 		if playing {
-			data := make([]byte, 256)
-			err := rtmpConn.SendData(data[0:], rtmp.DataTypeAudio)
+			n, err := flvFile.Read(buf[offs:])
 			if nil != err {
-				// TODO: finish RTMP here due to network error
+				fmt.Printf("Fail read flv file (%s)\n", flvFilePath)
+				return
 			}
+			header, tags, consumedBytes, err := flv.Decode(buf[0:n])
+			if nil != header {
+				fmt.Printf("FLV -- header\n")
+				rtmpConn.SendData(header, rtmp.DataTypeMetadata)
+			}
+			for _, tag := range tags {
+				var dataType = rtmp.DataTypeVideo
+				switch tag.Tag {
+				case flv.TagAudio:
+					fmt.Printf("FLV -- AudioTag\n")
+					dataType = rtmp.DataTypeAudio
+				case flv.TagVideo:
+					fmt.Printf("FLV -- VideoTag\n")
+					dataType = rtmp.DataTypeVideo
+				case flv.TagScript:
+					fmt.Printf("FLV -- MetadataTag\n")
+					dataType = rtmp.DataTypeMetadata
+				}
+				err = rtmpConn.SendData(tag.TagBuf, dataType)
+				if nil != err {
+					// TODO: finish RTMP here due to network error
+				}
+			}
+			copy(buf[0:], buf[consumedBytes:])
 		}
 	}
 }
 
 func main() {
+	flag.Parse()
+	fmt.Printf("FLV file path %s\n", flvFilePath)
+
 	addr, err := net.ResolveTCPAddr("tcp", ":1935")
 	if nil != err {
 		fmt.Printf("Fail resolve addr(%s)\n", err)
