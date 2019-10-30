@@ -1,12 +1,14 @@
 package flv
 
 import (
+	bin "encoding/binary"
 	"errors"
+	"fmt"
 )
 
 const (
-	TagVideo  = 8
-	TagAudio  = 9
+	TagAudio  = 8
+	TagVideo  = 9
 	TagScript = 18
 )
 
@@ -17,6 +19,7 @@ const (
 
 type FLVTag struct {
 	Tag               uint8
+	PrevTagSize       uint32
 	DataSize          int    /* 24 bits*/
 	Timestamp         uint32 /* 24 bits */
 	TimestampExtended uint8
@@ -43,9 +46,10 @@ func NewEncoder() *FLV {
 
 // Input buffer include tag header
 // []byte is the header, nil if not header
+// []byte is last tag size int this buf
 // FLVTag array is tags in the buffer
 // int return consumed bytes
-func Decode(buf []byte) ([]byte, []*FLVTag, int, error) {
+func Decode(buf []byte) ([]byte, []byte, []*FLVTag, int, error) {
 	var header []byte = nil
 	var offs = 0
 
@@ -66,7 +70,13 @@ func Decode(buf []byte) ([]byte, []*FLVTag, int, error) {
 		}
 	}
 
-	return header, tags, offs, nil
+	var tailTagSize []byte = nil
+	if offs+4 <= len(buf) {
+		tailTagSize = buf[offs : offs+4]
+		fmt.Printf("Tail tag size %x\n", tailTagSize)
+	}
+
+	return header, tailTagSize, tags, offs, nil
 }
 
 // Input buffer is raw data [AudioTag, VideoTag, ScriptTag]
@@ -77,22 +87,24 @@ func (flv *FLV) Encode(buf []byte, tagType int) (*FLVTag, error) {
 func DecodeTag(buf []byte) (*FLVTag, int, error) {
 	var tag FLVTag
 
-	if len(buf) < 11 {
+	if len(buf) < TagHeaderSize+4 {
 		return nil, 0, errors.New("Not full header")
 	}
 
-	tag.Tag = buf[0]
-	tag.DataSize = int(buf[1]<<16 + buf[2]<<8 + buf[3])
-	if len(buf) < TagHeaderSize+tag.DataSize {
+	tag.PrevTagSize = bin.BigEndian.Uint32(buf[0:4])
+	tag.Tag = buf[4]
+	tag.DataSize = int(bin.BigEndian.Uint32(buf[4:8]) & 0x00ffffff)
+	if len(buf) < TagHeaderSize+tag.DataSize+4 {
 		return nil, 0, errors.New("Not enough data")
 	}
 
-	tag.Timestamp = uint32(buf[4]<<16 + buf[5]<<8 + buf[6])
-	tag.TimestampExtended = buf[7]
-	tag.TagBuf = buf[0 : TagHeaderSize+tag.DataSize]
-	tag.Data = buf[TagHeaderSize : TagHeaderSize+tag.DataSize]
+	tag.Timestamp = uint32(bin.BigEndian.Uint32(buf[8:12])&0xffffff00) >> 8
+	tag.TimestampExtended = buf[11]
 
-	return &tag, TagHeaderSize + tag.DataSize, nil
+	tag.TagBuf = buf[0 : TagHeaderSize+tag.DataSize+4]
+	tag.Data = buf[TagHeaderSize+4 : TagHeaderSize+tag.DataSize+4]
+
+	return &tag, TagHeaderSize + tag.DataSize + 4, nil
 }
 
 func NewFLVTag(dataSize int, tagType uint8) *FLVTag {

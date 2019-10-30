@@ -64,45 +64,70 @@ func handleConnection(conn *net.TCPConn) {
 
 	flvFile, _ := os.Open(flvFilePath)
 	defer flvFile.Close()
-	var buf [1024]byte
+	testFile, _ := os.Create("./r.flv")
+	defer testFile.Close()
+
+	var buf [1024 * 1024]byte
 	var offs = 0
+	var tailTagSize []byte = nil
+	var tags []*flv.FLVTag = nil
+	var err error = nil
+	var consumedBytes = 0
+	var header []byte = nil
 
 	for {
-		err := rtmpConn.OnChunk()
+		err = rtmpConn.OnChunk()
 		if nil != err {
 			fmt.Printf("%s\n", err)
 			return
 		}
 		if playing {
+			var done = false
 			n, err := flvFile.Read(buf[offs:])
 			if nil != err {
-				fmt.Printf("Fail read flv file (%s)\n", flvFilePath)
+				done = true
+			}
+			if 0 < n {
+				header, tailTagSize, tags, consumedBytes, err = flv.Decode(buf[0 : offs+n])
+				if nil != header {
+					fmt.Printf("FLV -- header(%x)\n", header)
+					testFile.Write(header)
+					rtmpConn.SendData(header, rtmp.DataTypeMetadata)
+				}
+				for _, tag := range tags {
+					fmt.Printf("FLV -- Tag %x/%x/%x ", tag.PrevTagSize, tag.DataSize, tag.Tag)
+					var dataType = rtmp.DataTypeVideo
+					switch tag.Tag {
+					case flv.TagAudio:
+						fmt.Printf("(AudioTag)\n")
+						dataType = rtmp.DataTypeAudio
+					case flv.TagVideo:
+						fmt.Printf("(VideoTag)\n")
+						dataType = rtmp.DataTypeVideo
+					case flv.TagScript:
+						fmt.Printf("(MetadataTag)\n")
+						dataType = rtmp.DataTypeMetadata
+					default:
+						fmt.Printf("(Unknow)\n")
+						continue
+					}
+					testFile.Write(tag.TagBuf)
+					err = rtmpConn.SendData(tag.TagBuf, dataType)
+					if nil != err {
+						// TODO: finish RTMP here due to network error
+					}
+				}
+				copy(buf[0:], buf[consumedBytes:])
+				offs += len(buf) - consumedBytes
+			}
+			if done {
+				if nil != tailTagSize {
+					testFile.Write(tailTagSize)
+					rtmpConn.SendData(tailTagSize, rtmp.DataTypeMetadata)
+				}
 				return
 			}
-			header, tags, consumedBytes, err := flv.Decode(buf[0:n])
-			if nil != header {
-				fmt.Printf("FLV -- header\n")
-				rtmpConn.SendData(header, rtmp.DataTypeMetadata)
-			}
-			for _, tag := range tags {
-				var dataType = rtmp.DataTypeVideo
-				switch tag.Tag {
-				case flv.TagAudio:
-					fmt.Printf("FLV -- AudioTag\n")
-					dataType = rtmp.DataTypeAudio
-				case flv.TagVideo:
-					fmt.Printf("FLV -- VideoTag\n")
-					dataType = rtmp.DataTypeVideo
-				case flv.TagScript:
-					fmt.Printf("FLV -- MetadataTag\n")
-					dataType = rtmp.DataTypeMetadata
-				}
-				err = rtmpConn.SendData(tag.TagBuf, dataType)
-				if nil != err {
-					// TODO: finish RTMP here due to network error
-				}
-			}
-			copy(buf[0:], buf[consumedBytes:])
+			header, tailTagSize, tags, consumedBytes, err = flv.Decode(buf[0:n])
 		}
 	}
 }

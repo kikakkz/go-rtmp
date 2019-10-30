@@ -976,6 +976,8 @@ func (r *RTMP) SendData(data []byte, dataType int) error {
 		pkt = obtainPacket(len(data), 0, MsgVideo, StreamMsgData)
 	case DataTypeMetadata:
 		pkt = obtainPacket(len(data), 0, MsgMetaAMF0, StreamMsgData)
+	default:
+		return errors.New("Invalid data type")
 	}
 
 	copy(pkt.body[MaxHeaderSize:], data[0:])
