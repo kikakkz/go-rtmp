@@ -88,8 +88,8 @@ const (
 	MsgChunkSize    = 1
 	MsgStreamCancel = 2
 	MsgSendWndSize  = 3
-	MsgRecvWndSize  = 5
 	MsgUserCtrl     = 4
+	MsgWndAckSize   = 5
 	MsgBandwidth    = 6
 	MsgCmdAMF0      = 20
 	MsgCmdAMF3      = 17
@@ -236,6 +236,8 @@ type RTMP struct {
 	createStreamID int /* Request of create stream */
 	link           Link
 	playing        bool
+	audioStream    *stream
+	videoStream    *stream
 	dataStream     *stream
 }
 
@@ -255,6 +257,7 @@ func New(conn *net.TCPConn, evl func(ev int, arg interface{}, body []byte) error
 	r.tsS1 = 0
 	r.inChunkSize = DefaultChunkSize
 	r.outChunkSize = DefaultChunkSize
+	r.createStreamID = 10
 
 	return &r
 }
@@ -477,18 +480,13 @@ func (r *RTMP) findStreamByID(streamID int) *stream {
 }
 
 func (r *RTMP) onChunkSize(st *stream) error {
-	var b [4]byte
-	_, err := r.read(b[0:])
-	if nil != err {
-		return err
-	}
-	if 0 == (0x80 & b[0]) {
+	if 0 == (0x80 & st.pktIn.body[0]) {
 		str := fmt.Sprintf("First bit of chunk size mismatched")
 		fmt.Printf(str)
 		return errors.New(str)
 	}
 
-	r.inChunkSize = int(bin.BigEndian.Uint32(b[0:4]))
+	r.inChunkSize = int(bin.BigEndian.Uint32(st.pktIn.body[0:4]))
 	return nil
 }
 
@@ -679,6 +677,58 @@ func (r *RTMP) onConnectResp(st *stream, txID int) error {
 	return err
 }
 
+func (r *RTMP) sendChunkSize(st *stream) error {
+	var ctrlStream stream
+	ctrlStream.streamID = StreamChunkCtrl
+
+	pkt := obtainPacket(256, 0, MsgChunkSize, StreamMsgCtrl)
+	end := (*C.char)(unsafe.Pointer(&pkt.body[len(pkt.body)-1]))
+	enc := (*C.char)(unsafe.Pointer(&pkt.body[MaxHeaderSize]))
+	start := enc
+
+	enc = C.AMF_EncodeInt32(enc, end, C.int(r.outChunkSize))
+
+	pkt.msgLen = int(C.bufLen(start, enc))
+
+	_, err := r.sendPacket(&ctrlStream, pkt)
+	return err
+}
+
+func (r *RTMP) sendBandwidth(st *stream, bw int) error {
+	var ctrlStream stream
+	ctrlStream.streamID = StreamChunkCtrl
+
+	pkt := obtainPacket(256, 0, MsgBandwidth, StreamMsgCtrl)
+	end := (*C.char)(unsafe.Pointer(&pkt.body[len(pkt.body)-1]))
+	enc := (*C.char)(unsafe.Pointer(&pkt.body[MaxHeaderSize]))
+	start := enc
+
+	enc = C.AMF_EncodeInt32(enc, end, C.int(bw))
+	enc = C.encodeByte(enc, 2)
+
+	pkt.msgLen = int(C.bufLen(start, enc))
+
+	_, err := r.sendPacket(&ctrlStream, pkt)
+	return err
+}
+
+func (r *RTMP) sendWndAckSize(st *stream, size int) error {
+	var ctrlStream stream
+	ctrlStream.streamID = StreamChunkCtrl
+
+	pkt := obtainPacket(256, 0, MsgWndAckSize, StreamMsgCtrl)
+	end := (*C.char)(unsafe.Pointer(&pkt.body[len(pkt.body)-1]))
+	enc := (*C.char)(unsafe.Pointer(&pkt.body[MaxHeaderSize]))
+	start := enc
+
+	enc = C.AMF_EncodeInt32(enc, end, C.int(size))
+
+	pkt.msgLen = int(C.bufLen(start, enc))
+
+	_, err := r.sendPacket(&ctrlStream, pkt)
+	return err
+}
+
 func (r *RTMP) onConnect(st *stream, txID int, cmdObj *C.AMFObject, extraObjs []*C.AMFObject, obj *C.AMFObject) error {
 	count := int(C.AMF_CountProp(cmdObj))
 	for i := 0; i < count; i++ {
@@ -719,11 +769,14 @@ func (r *RTMP) onConnect(st *stream, txID int, cmdObj *C.AMFObject, extraObjs []
 		r.link.extras = extraObjs
 	}
 
+	r.sendWndAckSize(st, 5000000)
+	r.sendBandwidth(st, 5000000)
 	r.sendCtrl(st, CTRL_STREAM_BEGIN, nil)
+
 	return r.onConnectResp(st, txID)
 }
 
-func (r *RTMP) onNumberResp(st *stream, txID int, streamID int) error {
+func (r *RTMP) onCreateStreamResp(st *stream, txID int, streamID int) error {
 	pkt := obtainPacket(256, 1, MsgCmdAMF0, StreamMsgCtrl)
 
 	end := (*C.char)(unsafe.Pointer(&pkt.body[len(pkt.body)-1]))
@@ -749,7 +802,7 @@ func (r *RTMP) onDeleteStream(st *stream, txID int, cmdObj *C.AMFObject, extraOb
 		}
 	}
 	r.playing = false
-	r.event(EV_DEL_STREAM, streamID, nil)
+	r.event(EV_DEL_STREAM, int(streamID), nil)
 	return nil
 }
 
@@ -757,14 +810,18 @@ func (r *RTMP) onCreateStream(st *stream, txID int, cmdObj *C.AMFObject, extraOb
 	streamID := r.createStreamID
 	r.createStreamID += 1
 	r.event(EV_CREATE_STREAM, streamID, nil)
-	return r.onNumberResp(st, txID, streamID)
+
+	r.sendChunkSize(st)
+	r.sendCtrl(st, CTRL_STREAM_BEGIN, nil)
+
+	return r.onCreateStreamResp(st, txID, streamID)
 }
 
 func (r *RTMP) sendCtrl(st *stream, ctrl int, param interface{}) error {
 	var ctrlStream stream
 	ctrlStream.streamID = StreamChunkCtrl
 
-	pkt := obtainPacket(256, 1, MsgUserCtrl, StreamMsgCtrl)
+	pkt := obtainPacket(256, 0, MsgUserCtrl, StreamMsgCtrl)
 	end := (*C.char)(unsafe.Pointer(&pkt.body[len(pkt.body)-1]))
 	enc := (*C.char)(unsafe.Pointer(&pkt.body[MaxHeaderSize]))
 	start := enc
@@ -836,7 +893,11 @@ func (r *RTMP) onPlay(st *stream, txID int, cmdObj *C.AMFObject, extraObjs []*C.
 		App:      C.GoString(r.link.app.av_val),
 		Reset:    reset}, nil)
 
-	r.dataStream = st
+	r.audioStream = &stream{streamID: r.createStreamID}
+	r.createStreamID += 1
+	r.videoStream = &stream{streamID: r.createStreamID}
+	r.createStreamID += 1
+	r.dataStream = &stream{streamID: r.createStreamID}
 	r.playing = true
 
 	return r.onPlayResp(st, txID, reset)
@@ -907,7 +968,7 @@ func (r *RTMP) onPacket(st *stream) error {
 		err = r.onChunkSize(st)
 	case MsgStreamCancel:
 	case MsgSendWndSize:
-	case MsgRecvWndSize:
+	case MsgWndAckSize:
 	case MsgBandwidth:
 	case MsgCmdAMF0:
 		err = r.onCmdAMF0(st)
@@ -941,19 +1002,27 @@ func (r *RTMP) onChunkBody(st *stream) error {
 		nRead = nToRead
 	}
 
+	var err error = nil
+	var dataLen = 0
+	var dataTotal = 0
+	var readStart = st.pktIn.msgRead
+
 	if 0 < nRead {
-		_, err := r.read(st.pktIn.body[st.pktIn.msgRead : st.pktIn.msgRead+nRead])
-		if nil != err {
-			return err
+		for dataTotal < nRead {
+			dataLen, err = r.read(st.pktIn.body[st.pktIn.msgRead : readStart+nRead])
+			if nil != err {
+				return err
+			}
+			dataTotal += dataLen
+			st.pktIn.msgRead += dataLen
 		}
 	}
-	st.pktIn.msgRead += nRead
 
 	if st.pktIn.msgLen != st.pktIn.msgRead {
 		return nil
 	}
 
-	err := r.onPacket(st)
+	err = r.onPacket(st)
 
 	st.pktIn.body = nil
 	st.pktIn.msgLen = 0
@@ -968,14 +1037,18 @@ func (r *RTMP) SendData(data []byte, dataType int) error {
 	}
 
 	var pkt *packet
+	var st *stream
 
 	switch dataType {
 	case DataTypeAudio:
 		pkt = obtainPacket(len(data), 0, MsgAudio, StreamMsgData)
+		st = r.audioStream
 	case DataTypeVideo:
 		pkt = obtainPacket(len(data), 0, MsgVideo, StreamMsgData)
+		st = r.videoStream
 	case DataTypeMetadata:
 		pkt = obtainPacket(len(data), 0, MsgMetaAMF0, StreamMsgData)
+		st = r.dataStream
 	default:
 		return errors.New("Invalid data type")
 	}
@@ -983,15 +1056,19 @@ func (r *RTMP) SendData(data []byte, dataType int) error {
 	copy(pkt.body[MaxHeaderSize:], data[0:])
 	pkt.msgLen = len(data)
 
-	_, err := r.sendPacket(r.dataStream, pkt)
+	_, err := r.sendPacket(st, pkt)
 	return err
 }
 
 func (r *RTMP) onChunk() error {
 	var b [1]byte
-	_, err := r.read(b[0:])
+	n, err := r.read(b[0:])
 	if nil != err {
 		return err
+	}
+
+	if 0 == n {
+		return nil
 	}
 
 	streamType := b[0] & 0x3f

@@ -74,6 +74,7 @@ func handleConnection(conn *net.TCPConn) {
 	var err error = nil
 	var consumedBytes = 0
 	var header []byte = nil
+	var writeBuf []byte = nil
 
 	for {
 		err = rtmpConn.OnChunk()
@@ -92,11 +93,12 @@ func handleConnection(conn *net.TCPConn) {
 				if nil != header {
 					fmt.Printf("FLV -- header(%x)\n", header)
 					testFile.Write(header)
-					rtmpConn.SendData(header, rtmp.DataTypeMetadata)
+					// rtmpConn.SendData(header, rtmp.DataTypeMetadata)
 				}
 				for _, tag := range tags {
 					fmt.Printf("FLV -- Tag %x/%x/%x ", tag.PrevTagSize, tag.DataSize, tag.Tag)
 					var dataType = rtmp.DataTypeVideo
+					writeBuf = tag.Data
 					switch tag.Tag {
 					case flv.TagAudio:
 						fmt.Printf("(AudioTag)\n")
@@ -112,7 +114,8 @@ func handleConnection(conn *net.TCPConn) {
 						continue
 					}
 					testFile.Write(tag.TagBuf)
-					err = rtmpConn.SendData(tag.TagBuf, dataType)
+					fmt.Printf("Buf %d/%x\n", len(writeBuf), writeBuf)
+					err = rtmpConn.SendData(writeBuf, dataType)
 					if nil != err {
 						// TODO: finish RTMP here due to network error
 					}
