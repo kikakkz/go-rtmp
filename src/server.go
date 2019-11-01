@@ -114,7 +114,6 @@ func handleConnection(conn *net.TCPConn) {
 						continue
 					}
 					testFile.Write(tag.TagBuf)
-					fmt.Printf("Buf %d/%x\n", len(writeBuf), writeBuf)
 					err = rtmpConn.SendData(writeBuf, dataType)
 					if nil != err {
 						// TODO: finish RTMP here due to network error

@@ -165,11 +165,12 @@ type packet struct {
 }
 
 type stream struct {
-	streamID  int
-	pktIn     packet
-	pktInCnt  int
-	pktOut    *packet
-	pktOutCnt int
+	streamID     int
+	extTimestamp bool
+	pktIn        packet
+	pktInCnt     int
+	pktOut       *packet
+	pktOutCnt    int
 }
 
 const (
@@ -448,11 +449,11 @@ func (r *RTMP) readHeader(st *stream) error {
 		st.pktIn.msgStreamID = bin.LittleEndian.Uint32(b[7:headerLen])
 		fallthrough
 	case 1:
-		st.pktIn.msgLen = int(b[3]<<16 | b[4]<<8 | b[5])
+		st.pktIn.msgLen = int(b[3])<<16 | int(b[4])<<8 | int(b[5])
 		st.pktIn.msgTypeID = b[6]
 		fallthrough
 	case 2:
-		st.pktIn.timestamp = uint32(b[0]<<16 | b[1]<<8 | b[2])
+		st.pktIn.timestamp = uint32(b[0])<<16 | uint32(b[1])<<8 | uint32(b[2])
 		fallthrough
 	case 3:
 		break
@@ -522,7 +523,7 @@ func (r *RTMP) sendPacket(st *stream, pkt *packet) (int, error) {
 	streamIdBytes := st.streamIdBytes()
 	headerLen += streamIdBytes
 	timestamp = pkt.timestamp - timestampLast
-	if 0xffffff < timestamp {
+	if 0xffffff < timestamp && st.extTimestamp {
 		pkt.extTimestamp = true
 		pkt.extTimestampVal = timestamp
 		pkt.timestamp = 0xffffff
@@ -533,12 +534,12 @@ func (r *RTMP) sendPacket(st *stream, pkt *packet) (int, error) {
 	var offs = MaxHeaderSize - headerLen
 
 	if nil == pkt.body {
-		pktBuf = make([]byte, headerLen)
+		pktBuf = make([]byte, headerLen+1)
 	} else {
-		pktBuf = pkt.body[offs:MaxHeaderSize]
+		pktBuf = pkt.body[offs : MaxHeaderSize+1]
 	}
 
-	end := (*C.char)(unsafe.Pointer(&pktBuf[MaxHeaderSize-offs-1]))
+	end := (*C.char)(unsafe.Pointer(&pktBuf[MaxHeaderSize-offs]))
 	enc := (*C.char)(unsafe.Pointer(&pktBuf[0]))
 	start := enc
 
@@ -601,9 +602,12 @@ func (r *RTMP) sendPacket(st *stream, pkt *packet) (int, error) {
 				sendBuf[offs+2] = byte(st.streamID >> 8)
 			}
 			if pkt.extTimestamp {
-				end = (*C.char)(unsafe.Pointer(&sendBuf[offs+7]))
-				enc = (*C.char)(unsafe.Pointer(&sendBuf[offs+3]))
+				end = (*C.char)(unsafe.Pointer(&sendBuf[offs+5+streamIdBytes]))
+				enc = (*C.char)(unsafe.Pointer(&sendBuf[offs+1+streamIdBytes]))
 				enc = C.AMF_EncodeInt32(enc, end, C.int(pkt.extTimestampVal))
+				if nil == enc {
+					fmt.Printf("Error: fail set ext timestamp\n")
+				}
 			}
 		}
 
@@ -632,7 +636,7 @@ func stringToCString(str string) *C.char {
 
 func obtainPacket(bodySize int, headerType uint8, msgTypeID uint8, msgStreamID uint32) *packet {
 	var pkt packet
-	pkt.body = make([]byte, bodySize+MaxHeaderSize)
+	pkt.body = make([]byte, bodySize+MaxHeaderSize+1)
 	pkt.headerType = headerType
 	pkt.msgTypeID = msgTypeID
 	pkt.timestamp = 0
@@ -678,8 +682,7 @@ func (r *RTMP) onConnectResp(st *stream, txID int) error {
 }
 
 func (r *RTMP) sendChunkSize(st *stream) error {
-	var ctrlStream stream
-	ctrlStream.streamID = StreamChunkCtrl
+	var ctrlStream = stream{streamID: StreamChunkCtrl, extTimestamp: true}
 
 	pkt := obtainPacket(256, 0, MsgChunkSize, StreamMsgCtrl)
 	end := (*C.char)(unsafe.Pointer(&pkt.body[len(pkt.body)-1]))
@@ -695,8 +698,7 @@ func (r *RTMP) sendChunkSize(st *stream) error {
 }
 
 func (r *RTMP) sendBandwidth(st *stream, bw int) error {
-	var ctrlStream stream
-	ctrlStream.streamID = StreamChunkCtrl
+	var ctrlStream = stream{streamID: StreamChunkCtrl, extTimestamp: true}
 
 	pkt := obtainPacket(256, 0, MsgBandwidth, StreamMsgCtrl)
 	end := (*C.char)(unsafe.Pointer(&pkt.body[len(pkt.body)-1]))
@@ -713,8 +715,7 @@ func (r *RTMP) sendBandwidth(st *stream, bw int) error {
 }
 
 func (r *RTMP) sendWndAckSize(st *stream, size int) error {
-	var ctrlStream stream
-	ctrlStream.streamID = StreamChunkCtrl
+	var ctrlStream = stream{streamID: StreamChunkCtrl, extTimestamp: true}
 
 	pkt := obtainPacket(256, 0, MsgWndAckSize, StreamMsgCtrl)
 	end := (*C.char)(unsafe.Pointer(&pkt.body[len(pkt.body)-1]))
@@ -818,8 +819,7 @@ func (r *RTMP) onCreateStream(st *stream, txID int, cmdObj *C.AMFObject, extraOb
 }
 
 func (r *RTMP) sendCtrl(st *stream, ctrl int, param interface{}) error {
-	var ctrlStream stream
-	ctrlStream.streamID = StreamChunkCtrl
+	var ctrlStream = stream{streamID: StreamChunkCtrl, extTimestamp: true}
 
 	pkt := obtainPacket(256, 0, MsgUserCtrl, StreamMsgCtrl)
 	end := (*C.char)(unsafe.Pointer(&pkt.body[len(pkt.body)-1]))
@@ -893,11 +893,14 @@ func (r *RTMP) onPlay(st *stream, txID int, cmdObj *C.AMFObject, extraObjs []*C.
 		App:      C.GoString(r.link.app.av_val),
 		Reset:    reset}, nil)
 
-	r.audioStream = &stream{streamID: r.createStreamID}
+	r.audioStream = &stream{streamID: r.createStreamID, extTimestamp: true}
+	r.sendCtrl(r.audioStream, CTRL_STREAM_BEGIN, nil)
 	r.createStreamID += 1
-	r.videoStream = &stream{streamID: r.createStreamID}
+	r.videoStream = &stream{streamID: r.createStreamID, extTimestamp: true}
+	r.sendCtrl(r.videoStream, CTRL_STREAM_BEGIN, nil)
 	r.createStreamID += 1
-	r.dataStream = &stream{streamID: r.createStreamID}
+	r.dataStream = &stream{streamID: r.createStreamID, extTimestamp: false}
+	r.sendCtrl(r.dataStream, CTRL_STREAM_BEGIN, nil)
 	r.playing = true
 
 	return r.onPlayResp(st, txID, reset)
@@ -1053,6 +1056,7 @@ func (r *RTMP) SendData(data []byte, dataType int) error {
 		return errors.New("Invalid data type")
 	}
 
+	pkt.timestamp = uint32(time.Now().Unix())
 	copy(pkt.body[MaxHeaderSize:], data[0:])
 	pkt.msgLen = len(data)
 
@@ -1079,7 +1083,7 @@ func (r *RTMP) onChunk() error {
 
 	st := r.findStreamByID(streamID)
 	if nil == st {
-		st = &stream{streamID: streamID}
+		st = &stream{streamID: streamID, extTimestamp: true}
 		r.streams = append(r.streams, st)
 		r.event(EV_NEW_STREAM, streamID, nil)
 	}
