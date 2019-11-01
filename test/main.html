@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>播放器</title>
+        <link href="videolib/css/video-js.min.css" rel="stylesheet" type="text/css">
+        <script src="videolib/js/video.min.js"></script>
+        <script src="videolib/videojs-flash.min.js"></script>
+    </head>
+    <body>
+        <video id='myvideo' width=960 height=540 class="video-js vjs-default-skin" controls>
+            <source src="rtmp://localhost/app/xxxxxx">
+        </video>
+        <script>
+            var player = videojs('myvideo', {}, function(){
+                console.log('Initialize ...')
+            })
+            player.play();
+        </script>
+    </body>
+</html>

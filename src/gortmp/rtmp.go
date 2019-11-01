@@ -309,7 +309,7 @@ func (r *RTMP) onC0() error {
 		str := fmt.Sprintf("Mismatch version(%d != %d)\n", Version, b[0])
 		fmt.Printf(str)
 		r.event(EV_MISMATCH_VERSION, nil, nil)
-		return errors.New(str)
+		// return errors.New(str)
 	}
 
 	r.write(b[0:1])
@@ -363,9 +363,9 @@ func (r *RTMP) onC2() error {
 
 	tsS1 := bin.BigEndian.Uint32(b[0:4])
 	if tsS1 != r.tsS1 {
-		str := fmt.Sprintf("Server timestamp (%d ? %d)\n", r.tsS1, tsS1)
+		fmt.Printf("Server timestamp (%d ? %d)\n", r.tsS1, tsS1)
 		r.event(EV_MISMATCH_TS, nil, nil)
-		return errors.New(str)
+		// return errors.New(str)
 	}
 
 	r.event(EV_C2, nil, nil)
