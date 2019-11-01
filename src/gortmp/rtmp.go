@@ -952,7 +952,7 @@ func (r *RTMP) onCmdAMF0(st *stream) error {
 	b := st.pktIn.body
 	rc = C.AMF_Decode(&obj, (*C.char)(unsafe.Pointer(&b[0])), C.int(len(b)), 0)
 	if rc < 0 {
-		str := fmt.Sprintf("Fail decode command(%d)", rc)
+		str := fmt.Sprintf("Fail decode command(%d)\n", rc)
 		fmt.Printf(str)
 		return errors.New(str)
 	}
@@ -962,8 +962,19 @@ func (r *RTMP) onCmdAMF0(st *stream) error {
 }
 
 func (r *RTMP) onCmdAMF3(st *stream) error {
-	fmt.Printf("AMF3 CMD ---\n")
-	return nil
+	var obj C.AMFObject
+	var rc C.int
+
+	b := st.pktIn.body
+	rc = C.AMF_Decode(&obj, (*C.char)(unsafe.Pointer(&b[1])), C.int(len(b)-1), 0)
+	if rc < 0 {
+		str := fmt.Sprintf("Fail decode command(%d)\n", rc)
+		fmt.Printf(str)
+		return errors.New(str)
+	}
+	C.AMF_Dump(&obj)
+
+	return r.onCmd(st, &obj)
 }
 
 func (r *RTMP) onPacket(st *stream) error {
