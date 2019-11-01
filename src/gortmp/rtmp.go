@@ -240,6 +240,7 @@ type RTMP struct {
 	audioStream    *stream
 	videoStream    *stream
 	dataStream     *stream
+	timeStart      uint32
 }
 
 func (p *PlayParam) ToString() string {
@@ -901,7 +902,9 @@ func (r *RTMP) onPlay(st *stream, txID int, cmdObj *C.AMFObject, extraObjs []*C.
 	r.createStreamID += 1
 	r.dataStream = &stream{streamID: r.createStreamID, extTimestamp: false}
 	r.sendCtrl(r.dataStream, CTRL_STREAM_BEGIN, nil)
+
 	r.playing = true
+	r.timeStart = uint32(time.Now().Unix())
 
 	return r.onPlayResp(st, txID, reset)
 }
@@ -1034,7 +1037,7 @@ func (r *RTMP) onChunkBody(st *stream) error {
 	return err
 }
 
-func (r *RTMP) SendData(data []byte, dataType int) error {
+func (r *RTMP) SendData(data []byte, dataType int, timeDelta int) error {
 	if !r.playing {
 		return errors.New("Not playing")
 	}
@@ -1056,7 +1059,7 @@ func (r *RTMP) SendData(data []byte, dataType int) error {
 		return errors.New("Invalid data type")
 	}
 
-	pkt.timestamp = uint32(time.Now().Unix())
+	pkt.timestamp = r.timeStart + uint32(timeDelta)
 	copy(pkt.body[MaxHeaderSize:], data[0:])
 	pkt.msgLen = len(data)
 
