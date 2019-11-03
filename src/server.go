@@ -19,7 +19,7 @@ func handleConnection(conn *net.TCPConn) {
 	var rtmpConn *rtmp.RTMP
 	playing := false
 
-	rtmpConn = rtmp.New(conn, func(ev int, arg interface{}, b []byte) error {
+	rtmpConn = rtmp.New(conn, true, func(ev int, arg interface{}, b []byte) error {
 		switch ev {
 		case rtmp.EV_C0:
 			fmt.Printf("[%s] C0 ---\n", rtmpConn.Address())

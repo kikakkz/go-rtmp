@@ -5,7 +5,7 @@
       class="vjs-custom-skin"
       ref="videoPlayer"
       :options="playerOptions"
-      @ready="onPlayerReadied"
+      @ready="onPlayerReady"
       @timeupdate="onTimeupdate"
     ></video-player>
   </div>
@@ -16,9 +16,8 @@ export default {
   name: 'live',
   data () {
     return {
-      initialized: false,
       streams: {
-        rtmp: 'rtmp://192.168.199.199/app/test'
+        rtmp: 'rtmp://localhost/app/SampleVideo_1280x720_1mb.flv'
       },
       playerOptions: {
         overNative: true,
@@ -29,7 +28,7 @@ export default {
         sources: [
           {
             type: 'rtmp/flv',
-            src: 'rtmp://192.168.199.199/app/test'
+            src: 'rtmp://localhost/app/SampleVideo_1280x720_1mb.flv'
           }
         ],
         poster: ''
@@ -37,10 +36,7 @@ export default {
     }
   },
   methods: {
-    onPlayerReadied () {
-      if (!this.initialized) {
-        this.initialized = true
-      }
+    onPlayerReady () {
     },
     onTimeupdate (e) {
       console.log('currentTime', e.cache_.currentTime)

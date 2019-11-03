@@ -241,13 +241,14 @@ type RTMP struct {
 	videoStream    *stream
 	dataStream     *stream
 	timeStart      uint32
+	recorded       bool
 }
 
 func (p *PlayParam) ToString() string {
 	return fmt.Sprintf("/%s/%s(R:%v)", p.App, p.Playpath, p.Reset)
 }
 
-func New(conn *net.TCPConn, evl func(ev int, arg interface{}, body []byte) error) *RTMP {
+func New(conn *net.TCPConn, recorded bool, evl func(ev int, arg interface{}, body []byte) error) *RTMP {
 	var r RTMP
 
 	r.conn = conn
@@ -260,6 +261,7 @@ func New(conn *net.TCPConn, evl func(ev int, arg interface{}, body []byte) error
 	r.inChunkSize = DefaultChunkSize
 	r.outChunkSize = DefaultChunkSize
 	r.createStreamID = 10
+	r.recorded = recorded
 
 	return &r
 }
@@ -831,6 +833,8 @@ func (r *RTMP) sendCtrl(st *stream, ctrl int, param interface{}) error {
 
 	switch ctrl {
 	case CTRL_STREAM_BEGIN:
+		fallthrough
+	case CTRL_STREAM_IS_RECORD:
 		enc = C.AMF_EncodeInt32(enc, end, C.int(st.streamID))
 	}
 
@@ -902,6 +906,10 @@ func (r *RTMP) onPlay(st *stream, txID int, cmdObj *C.AMFObject, extraObjs []*C.
 	r.createStreamID += 1
 	r.dataStream = &stream{streamID: r.createStreamID, extTimestamp: false}
 	r.sendCtrl(r.dataStream, CTRL_STREAM_BEGIN, nil)
+
+	if r.recorded {
+		r.sendCtrl(st, CTRL_STREAM_IS_RECORD, nil)
+	}
 
 	r.playing = true
 	r.timeStart = uint32(time.Now().Unix())
@@ -1070,7 +1078,9 @@ func (r *RTMP) SendData(data []byte, dataType int, timeDelta int) error {
 		return errors.New("Invalid data type")
 	}
 
-	pkt.timestamp = r.timeStart + uint32(timeDelta)
+	if 0 <= timeDelta {
+		pkt.timestamp = uint32(timeDelta)
+	}
 	copy(pkt.body[MaxHeaderSize:], data[0:])
 	pkt.msgLen = len(data)
 
